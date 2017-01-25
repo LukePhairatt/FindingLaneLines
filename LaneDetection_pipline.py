@@ -80,7 +80,10 @@ def hough_lines(img, rho, theta, threshold, min_line_len, max_line_gap):
     lines = cv2.HoughLinesP(img, rho, theta, threshold, np.array([]), minLineLength=min_line_len, maxLineGap=max_line_gap)
     
     ##############################  Filtering/Grouping multiple lines down to 2 lines that cover a lane FOV ###############
-    # Group broken lines 
+    # Group broken lines if found any
+    if (lines == None):
+        return None, False
+    
     group_lines, group_slopes, group_interxs, FoundBothLines = GroupLineLeftRight(lines)
     # TODO try adaptive/global thresholding if missing lane
     if not FoundBothLines:
@@ -293,9 +296,15 @@ def process_image(image):
     line_image, FoundBothLine = hough_lines(masked_edges, rho, theta, threshold, min_line_len, max_line_gap)
      
     # Overlay lines
-    color_edges = np.dstack((edges, edges, edges))
-    line_edges = weighted_img(color_edges, line_image, alpha=0.8, beta=1., gamma=0.)
-    line_rgb = weighted_img(image, line_image, alpha=0.8, beta=1., gamma=0.)
+    if(line_image != None):
+        # there is one or two lines
+        color_edges = np.dstack((edges, edges, edges))
+        line_edges = weighted_img(color_edges, line_image, alpha=0.8, beta=1., gamma=0.)
+        line_rgb = weighted_img(image, line_image, alpha=0.8, beta=1., gamma=0.)
+    else:
+        # none found!
+        line_rgb = image
+        
     return line_rgb
 
 
