@@ -10,8 +10,6 @@ import os
 from moviepy.editor import VideoFileClip
 from IPython.display import HTML
 
-
-
 def grayscale(img):
     """Applies the Grayscale transform
     This will return an image with only one color channel
@@ -77,7 +75,7 @@ def draw_lines(img, lines, color=[255, 0, 0], thickness=2):
         for x1,y1,x2,y2 in line:
             cv2.line(img, (x1, y1), (x2, y2), color, thickness)
 
-def hough_lines(img, rho, theta, threshold, min_line_len, max_line_gap):
+def hough_lines(img, rho, theta, threshold, min_line_len, max_line_gap, draw_top, draw_bottom, slope_noise_tol):
     """
     `img` should be the output of a Canny transform.
         
@@ -100,7 +98,7 @@ def hough_lines(img, rho, theta, threshold, min_line_len, max_line_gap):
     else:
         # normal detection 
         # Should only have 2
-        mean_lines = RemoveOutlierMeanLines(group_lines, group_slopes, group_interxs, error_threshold = 0.2)
+        mean_lines = RemoveOutlierMeanLines(group_lines, group_slopes, group_interxs, error_threshold = slope_noise_tol)
         
         
         # Convert lines slope/intersection to 2 points for each line 
@@ -108,7 +106,7 @@ def hough_lines(img, rho, theta, threshold, min_line_len, max_line_gap):
         # slope + is Right, - slope is Left
         # draw from the bottom to end of edge
         ImageShape = [img.shape[0],img.shape[1]]
-        lines_xy = FindLineROI_XY(mean_lines, [460, img.shape[0]], img.shape)
+        lines_xy = FindLineROI_XY(mean_lines, [draw_top, draw_bottom], img.shape)
         #lines_xy = FindLineROI_XY(mean_lines, [min_y, img.shape[0]], img.shape)
         lines_xy = np.array(lines_xy).reshape( (len(lines_xy), 1, 4) ) 
         lines = lines_xy
@@ -193,7 +191,7 @@ def GroupLineLeftRight(lines):
     return group_lines, group_slopes, group_inters, FoundBoth
 
 
-def RemoveOutlierMeanLines(group_lines, group_slopes, group_inters, error_threshold = 0.3):
+def RemoveOutlierMeanLines(group_lines, group_slopes, group_inters, error_threshold = 0.25):
     """
         Clean up outlier points by checking slope
         Any error above/below thresholding from the mean will be thought of outliers
@@ -262,85 +260,143 @@ def FindLineROI_XY(mean_lines_params,Ymin_max, ImageShape):
     return filter_lines
 
 
-def process_image(image):
-    # NOTE: The output you return should be a color image (3 channel) for processing video below
-    # TODO: put your pipeline here,
-    # you should return the final output (image with lines are drawn on lanes)
+
+class LaneDetectionProcessor():
+    def __init__(self, vertices, draw_top, draw_bottom, RGBthreshold, slope_noise_tol):
+        # Lane ROI
+        self.vertices = vertices
+        # Draw hough line level
+        self.draw_top    = draw_top
+        self.draw_bottom = draw_bottom
+        # RGB lane thresholding
+        self.RGBthreshold = RGBthreshold
+        # Slope outlier noise filtering
+        self.slope_noise_tol = slope_noise_tol
+        
+        ######## Ideally this should work for all road conditions 
+        # blure iamge
+        self.kernel_size = 5
+        # edge canny
+        self.low_threshold = 50
+        self.high_threshold = 150
+        # Hough Transform
+        self.rho = 1                         # distance resolution in pixels of the Hough grid
+        self.theta = 1*np.pi/180             # angular resolution in radians of the Hough grid
+        self.threshold = 20                  # minimum number of votes (intersections in Hough grid cell) #20
+        self.min_line_len = 15               # minimum number of pixels making up a line (#15)
+        self.max_line_gap = 80               # maximum gap in pixels between connectable line segments #100
+        
+    def process_image(self, image):
+        # NOTE: The output you return should be a color image (3 channel) for processing video below
+        # TODO: put your pipeline here,
+        # you should return the final output (image with lines are drawn on lanes)
+        
+        #### Lane detection processing ####
+        # Extract lane from RGB channel
+        # This is a global thresholding
+        # Maybe improve by hist to sense brightness trained by machine learning
+        extarcted_RGB =  ColorSelection(image, self.RGBthreshold)
+        
+        # Convert to gray scale
+        gray = grayscale(extarcted_RGB)
+        
+        # Filtering noise Gaussian blur (13, 50, 150)
+        blure_gray = gaussian_blur(gray, self.kernel_size)
+        # Canny edge detection
+        edges = canny(blure_gray, self.low_threshold, self.high_threshold)
+        
+        # Edge smoothing
+        #erode  = (5,5)
+        #dilate = (5,5)
+        #edge = cv2.dilate(  cv2.erode( edges, np.ones(erode)  ), np.ones(dilate) )
+        
+        # select lane ROI
+        masked_edges = region_of_interest(edges, self.vertices)
     
-    # RGB lane thresholding
-    RGBthreshold =  [220,170,0]
-    
-    # blure iamge
-    kernel_size = 5
-    # edge canny
-    low_threshold = 50
-    high_threshold = 150
-    # ROI- fixed don't change
-    imshape = image.shape
-    vertices = np.array([[
-                          (200,670),
-                          (605, 440),
-                          (750, 440),
-                          (1130,670)
+        # Finding lane lines- Hough Transform
+        FoundBothLine = False
+        line_image, FoundBothLine = hough_lines(masked_edges, self.rho, self.theta, self.threshold, self.min_line_len, self.max_line_gap, \
+                                                self.draw_top, self.draw_bottom, self.slope_noise_tol)
+        
+        # Overlay lines
+        if(line_image != None):
+            # there is one or two lines
+            color_edges = np.dstack((edges, edges, edges))
+            line_edges = weighted_img(color_edges, line_image, alpha=0.8, beta=1., gamma=0.)
+            line_rgb = weighted_img(image, line_image, alpha=0.8, beta=1., gamma=0.)
+        else:
+            # none found!
+            line_rgb = image
+                
+        return line_rgb
+
+
+###############################   Main  ###################################
+# TODO: Build your pipeline that will draw lane lines on the test_images
+# then save them to the test_images directory.
+###############################   Main  ###################################
+# TODO: Build your pipeline that will draw lane lines on the test_images
+# then save them to the test_images directory.
+
+################################ TEST 1 ##################################
+# Seting parameter according to the video input
+vertices = np.array([[
+                          (120, 540),
+                          (450, 320),
+                          (525, 320),
+                          (910, 540)
                           ]],dtype=np.int32)
-    
-    # Hough Transform
-    rho = 1                         # distance resolution in pixels of the Hough grid
-    theta = 1*np.pi/180             # angular resolution in radians of the Hough grid
-    threshold = 20                  # minimum number of votes (intersections in Hough grid cell) #20
-    min_line_len = 15               # minimum number of pixels making up a line (#10)
-    max_line_gap = 80              # maximum gap in pixels between connectable line segments #100
-    
-    #### Lane detection processing ####
-    
-    # Extract lane from RGB channel
-    # This is a global thresholding
-    # Maybe improve by hist to sense brightness trained by machine learning
-    extarcted_RGB =  ColorSelection(image, RGBthreshold)
-    
-    # Convert to gray scale
-    gray = grayscale(extarcted_RGB)
-    
-    # Filtering noise Gaussian blur (13, 50, 150)
-    blure_gray = gaussian_blur(gray, kernel_size)
-    # Canny edge detection
-    edges = canny(blure_gray, low_threshold, high_threshold)
-    
-    # Edge smoothing
-    #erode  = (5,5)
-    #dilate = (5,5)
-    #edge = cv2.dilate(  cv2.erode( edges, np.ones(erode)  ), np.ones(dilate) )
-    
-    # select lane ROI
-    masked_edges = region_of_interest(edges, vertices)
 
-    # Finding lane lines- Hough Transform
-    FoundBothLine = False
-    line_image, FoundBothLine = hough_lines(masked_edges, rho, theta, threshold, min_line_len, max_line_gap)
-    
-    # Overlay lines
-    if(line_image != None):
-        # there is one or two lines
-        color_edges = np.dstack((edges, edges, edges))
-        line_edges = weighted_img(color_edges, line_image, alpha=0.8, beta=1., gamma=0.)
-        line_rgb = weighted_img(image, line_image, alpha=0.8, beta=1., gamma=0.)
-    else:
-        # none found!
-        line_rgb = image
-    
-    return line_rgb
+RGBthreshold =  [220,170,0]    #[210,120,10]#[210,60,10]
+
+# Draw hough line level- double check with image height
+draw_top    = 320
+draw_bottom = 540
+
+# slope noise filtering
+slope_noise_tol = 0.3
+
+# Create instance of Lane processor
+LandDetector = LaneDetectionProcessor(vertices, draw_top, draw_bottom, RGBthreshold, slope_noise_tol)
+
+white_output = 'white.mp4'
+clip1 = VideoFileClip("solidWhiteRight.mp4")
+white_clip = clip1.fl_image(LandDetector.process_image) #NOTE: this function expects color images!!
+white_clip.write_videofile(white_output, audio=False)
 
 
-###############################   Main  ###################################
-# TODO: Build your pipeline that will draw lane lines on the test_images
-# then save them to the test_images directory.
-###############################   Main  ###################################
-# TODO: Build your pipeline that will draw lane lines on the test_images
-# then save them to the test_images directory.
+yellow_output = 'yellow.mp4'
+clip2 = VideoFileClip('solidYellowLeft.mp4')
+yellow_clip = clip2.fl_image(LandDetector.process_image)
+yellow_clip.write_videofile(yellow_output, audio=False)
 
+
+############################ TEST CHELLENGE ###############################
+# Seting parameter according to the video input
+vertices = np.array([[
+                              (200,670),
+                              (605,440),
+                              (750,440),
+                              (1130,670)
+                              ]],dtype=np.int32)
+
+RGBthreshold =  [220,170,0]    #[210,120,10]#[210,60,10]
+
+# Draw hough line level- double check with image height
+draw_top    = 460
+draw_bottom = 720
+
+# slope noise filtering
+slope_noise_tol = 0.2
+
+# Create instance of Lane processor
+LandDetector = LaneDetectionProcessor(vertices, draw_top, draw_bottom, RGBthreshold, slope_noise_tol)
+
+
+# Video processing
 drive_output = 'extra.mp4'
 clip1 = VideoFileClip("challenge.mp4")
-drive_clip = clip1.fl_image(process_image) #NOTE: this function expects color images!!
+drive_clip = clip1.fl_image(LandDetector.process_image) #NOTE: this function expects color images!!
 drive_clip.write_videofile(drive_output, audio=False)
 
 
